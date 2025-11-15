@@ -1,173 +1,106 @@
-use env_logger;
-use log::{debug, error, info, warn};
+use inhibitor::InhibitorState;
 use std::error::Error;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
-use wayland_client::{
-    protocol::{wl_compositor, wl_registry, wl_surface},
-    Connection, Dispatch, Proxy,
-};
-use wayland_protocols::wp::idle_inhibit::zv1::client::{
-    zwp_idle_inhibit_manager_v1::ZwpIdleInhibitManagerV1, zwp_idle_inhibitor_v1::ZwpIdleInhibitorV1,
-};
+use tokio::signal::unix::{signal, SignalKind};
+use zbus::interface;
+use zbus::object_server::SignalEmitter;
 
-#[derive(Default)]
-struct AppData {
-    compositor: Option<(wl_compositor::WlCompositor, u32)>,
-    surface: Option<wl_surface::WlSurface>,
-    inhibit_manager: Option<(ZwpIdleInhibitManagerV1, u32)>,
-    inhibitor: Option<ZwpIdleInhibitorV1>,
+mod inhibitor;
+
+struct AppState {
+    inhibitor_state: Option<InhibitorState>,
 }
 
-impl Dispatch<wl_registry::WlRegistry, ()> for AppData {
-    fn event(
-        state: &mut Self,
-        proxy: &wl_registry::WlRegistry,
-        event: <wl_registry::WlRegistry as wayland_client::Proxy>::Event,
-        _data: &(),
-        _connection: &wayland_client::Connection,
-        queue_handle: &wayland_client::QueueHandle<Self>,
-    ) {
-        match event {
-            wl_registry::Event::Global {
-                name,
-                interface,
-                version,
-            } => {
-                debug!("| Received wl_registry::Event::Global: {interface} v{version}");
-                if interface == wl_compositor::WlCompositor::interface().name
-                    && state.compositor.is_none()
-                {
-                    // wl_compositor
-                    info!("> Bound: {interface} v{version}");
-                    let compositor: wl_compositor::WlCompositor =
-                        proxy.bind(name, version, queue_handle, ());
-                    state.surface = Some(compositor.create_surface(&queue_handle, ()));
-                    state.compositor = Some((compositor, name));
-                } else if interface == ZwpIdleInhibitManagerV1::interface().name {
-                    // zwp_idle_inhibit_manager
-                    info!("> Bound: {interface} v{version}");
-                    state.inhibit_manager =
-                        Some((proxy.bind(name, version, queue_handle, ()), name));
-                };
-            }
-            wl_registry::Event::GlobalRemove { name } => {
-                debug!("| Received wl_registry::Event::GlobalRemove");
-                if let Some((_, compositor_name)) = &state.compositor {
-                    if name == *compositor_name {
-                        warn!("WlCompositor was removed");
-                        state.compositor = None;
-                        state.surface = None;
-                    }
-                } else if let Some((_, inhibit_manager_name)) = &state.inhibit_manager {
-                    if name == *inhibit_manager_name {
-                        warn!("ZwpIdleInhibitManagerV1 was removed");
-                        state.inhibit_manager = None;
-                    }
-                }
-            }
-            _ => {}
+impl AppState {
+    fn start_inhibitor(&mut self) {
+        let mut state = InhibitorState::default();
+        state.setup();
+        self.inhibitor_state = Some(state);
+    }
+}
+
+#[interface(name = "st.contraptioni.IdleInhibitor1")]
+impl AppState {
+    async fn enable_inhibitor(
+        &mut self,
+        #[zbus(signal_emitter)] emitter: SignalEmitter<'_>,
+    ) -> bool {
+        if self.inhibitor_state.is_some() {
+            println!("Inhibitor already active");
+            false
+        } else {
+            self.start_inhibitor();
+            let _ = self.is_inhibitor_active_changed(&emitter).await;
+            true
         }
     }
-}
 
-impl Dispatch<wl_compositor::WlCompositor, ()> for AppData {
-    fn event(
-        _state: &mut Self,
-        _proxy: &wl_compositor::WlCompositor,
-        _event: <wl_compositor::WlCompositor as Proxy>::Event,
-        _data: &(),
-        _connection: &wayland_client::Connection,
-        _queue_handle: &wayland_client::QueueHandle<Self>,
-    ) {
+    async fn disable_inhibitor(
+        &mut self,
+        #[zbus(signal_emitter)] emitter: SignalEmitter<'_>,
+    ) -> bool {
+        if self.inhibitor_state.is_none() {
+            println!("Inhibitor not active");
+            false
+        } else {
+            self.inhibitor_state = None;
+            let _ = self.is_inhibitor_active_changed(&emitter).await;
+            true
+        }
+    }
+
+    async fn toggle_inhibitor(
+        &mut self,
+        #[zbus(signal_emitter)] emitter: SignalEmitter<'_>,
+    ) -> bool {
+        if self.inhibitor_state.is_some() {
+            self.inhibitor_state = None;
+            let _ = self.is_inhibitor_active_changed(&emitter).await;
+            false
+        } else {
+            self.start_inhibitor();
+            let _ = self.is_inhibitor_active_changed(&emitter).await;
+            true
+        }
+    }
+
+    #[zbus(property)]
+    async fn is_inhibitor_active(&self) -> bool {
+        self.inhibitor_state.is_some()
     }
 }
 
-impl Dispatch<wl_surface::WlSurface, ()> for AppData {
-    fn event(
-        _state: &mut Self,
-        _proxy: &wl_surface::WlSurface,
-        _event: <wl_surface::WlSurface as Proxy>::Event,
-        _data: &(),
-        _connection: &wayland_client::Connection,
-        _queue_handle: &wayland_client::QueueHandle<Self>,
-    ) {
+impl Drop for AppState {
+    fn drop(&mut self) {
+        self.inhibitor_state = None;
     }
 }
 
-impl Dispatch<ZwpIdleInhibitManagerV1, ()> for AppData {
-    fn event(
-        _state: &mut Self,
-        _proxy: &ZwpIdleInhibitManagerV1,
-        _event: <ZwpIdleInhibitManagerV1 as Proxy>::Event,
-        _data: &(),
-        _connection: &wayland_client::Connection,
-        _queue_handle: &wayland_client::QueueHandle<Self>,
-    ) {
-    }
-}
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn Error>> {
+    println!("Idle Inhibitor Service starting...");
 
-impl Dispatch<ZwpIdleInhibitorV1, ()> for AppData {
-    fn event(
-        _state: &mut Self,
-        _proxy: &ZwpIdleInhibitorV1,
-        _event: <ZwpIdleInhibitorV1 as Proxy>::Event,
-        _data: &(),
-        _connection: &wayland_client::Connection,
-        _queue_handle: &wayland_client::QueueHandle<Self>,
-    ) {
-    }
-}
+    let dbus_path = "/st/contraptioni/IdleInhibitor";
 
-fn main() -> Result<(), Box<dyn Error>> {
-    env_logger::init();
+    let _connection = zbus::connection::Builder::session()?
+        .name("st.contraptioni.IdleInhibitor")?
+        .serve_at(
+            dbus_path,
+            AppState {
+                inhibitor_state: None,
+            },
+        )?
+        .build()
+        .await?;
 
-    let running = Arc::new(AtomicBool::new(false));
-    signal_hook::flag::register(signal_hook::consts::SIGINT, Arc::clone(&running))?;
-    signal_hook::flag::register(signal_hook::consts::SIGTERM, Arc::clone(&running))?;
+    println!("Listening on {}", dbus_path);
 
-    let connection = Connection::connect_to_env().unwrap();
-    let mut event_queue = connection.new_event_queue();
-    let queue_handle = event_queue.handle();
-    let display = connection.display();
-    let _registry = display.get_registry(&queue_handle, ());
-    let mut state = AppData::default();
+    let mut sigterm = signal(SignalKind::terminate())?;
+    let mut sigint = signal(SignalKind::interrupt())?;
 
-    event_queue.roundtrip(&mut state).unwrap();
-
-    let Some((inhibit_manager, _)) = &state.inhibit_manager else {
-        error!("No ZwpIdleInhibitManagerV1 loaded");
-        return Ok(());
+    tokio::select! {
+        _ = sigterm.recv() => {println!("SIGTERM Shuting down");},
+        _ = sigint.recv() => {println!("SIGINT Shuting down");},
     };
-    let Some(surface) = &state.surface else {
-        error!("No WlSurface loaded");
-        return Ok(());
-    };
-    // create idle inhibitor
-    state.inhibitor = Some(inhibit_manager.create_inhibitor(surface, &queue_handle, ()));
-    event_queue.roundtrip(&mut state).unwrap();
-
-    // wait for exit
-    while !running.load(Ordering::Relaxed) {
-        std::thread::sleep(std::time::Duration::from_millis(500));
-    }
-
-    debug!("Cleaning up...");
-
-    let Some((inhibit_manager, _)) = &state.inhibit_manager else {
-        error!("No ZwpIdleInhibitManagerV1 loaded");
-        return Ok(());
-    };
-    let Some(inhibitor) = &state.inhibitor else {
-        error!("No ZwpIdleInhibitorV1 loaded");
-        return Ok(());
-    };
-    // cleanup, destroy inhibitor & inhibit manager
-    inhibitor.destroy();
-    inhibit_manager.destroy();
-    event_queue.roundtrip(&mut state).unwrap();
-
-    debug!("Cleaned up, exiting...");
 
     Ok(())
 }

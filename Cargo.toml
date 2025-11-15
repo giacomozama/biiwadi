@@ -1,15 +1,12 @@
 [package]
-name = "vigiland"
-version = "0.1.0"
+name = "biiwadi"
+version = "1.0.0"
 edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-arc = "0.0.1"
-ctrlc = "3.4.4"
-env_logger = "0.11.3"
-log = "0.4.21"
-signal-hook = "0.3.17"
-wayland-client = "0.31.2"
-wayland-protocols = {version="0.31.2", features = ["client", "unstable"]}
+tokio = { version = "1.48.0", features = ["macros", "rt-multi-thread", "signal"] }
+wayland-client = "0.31.11"
+wayland-protocols = {version="0.32.9", features = ["client", "unstable"]}
+zbus = "5.12.0"

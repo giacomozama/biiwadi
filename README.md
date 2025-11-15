@@ -1,45 +1,40 @@
-# Vigiland
+# Biiwadi
 
-Inhibit idle behaviour of a Wayland compositor.
+Barebones Idle Inhibitor With A DBus Interface (for Wayland compositors).
 
-## Installing
+Originally based on [Vigiland](https://github.com/Jappie3/vigiland).
 
-### Arch (AUR)
+## Dependencies
 
-Thanks @kulothunganug for [packaging Vigiland on the AUR](https://aur.archlinux.org/packages/vigiland-git). You can install it using an AUR helper like yay or paru:
+- Rust
+- A compositor which supports the `idle-inhibit-unstable-v1` protocol.
 
-```
-paru -S vigiland-git
-```
+## Building
 
-### Nix
-
-Add the flake as an input:
-
-```nix
-vigiland.url = "github:jappie3/vigiland";
-```
-
-Install the package:
-
-```nix
-environment.systemPackages = [inputs.vigiland.packages.${pkgs.system}.vigiland];
+```bash
+cargo build --release
 ```
 
 ## Usage
 
-Run it, ctrl+c to exit:
+Once launched, the application will serve the following DBus interface on the session bus at `/st/contraptioni/IdleInhibitor`:
 
-```bash
-vigiland
+```xml
+<interface name="st.contraptioni.IdleInhibitor1">
+    <method name="EnableInhibitor">
+    <arg type="b" direction="out"/>
+    </method>
+    <method name="DisableInhibitor">
+    <arg type="b" direction="out"/>
+    </method>
+    <method name="ToggleInhibitor">
+    <arg type="b" direction="out"/>
+    </method>
+    <property name="IsInhibitorActive" type="b" access="read"/>
+</interface>
 ```
 
-You can also run it in the background & use `killall vigiland` to stop inhibiting idle behaviour:
-
-```bash
-vigiland & disown
-```
-
-## Technical
-
-Your compositor should support the `idle-inhibit-unstable-v1` protocol in order for Vigiland to work.
+### Note
+- The `EnableInhibitor` and `DisableInhibitor` methods will return `false` if the inhibitor was already in the requested state, `true` otherwise
+- The `ToggleInhibitor` method will return `true` if the inhibitor was enabled, `false` if it was disabled
+- The `IsInhibitorActive` method will return `true` if the inhibitor is currently enabled, `false` otherwise
